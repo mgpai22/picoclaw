@@ -268,6 +268,9 @@ func (hm *HookManager) ConfigureTimeouts(observer, interceptor, approval time.Du
 	}
 	if approval > 0 {
 		hm.approvalTimeout = approval
+	} else if approval < 0 {
+		// Negative means "no deadline": a human or host gate may take as long as it needs.
+		hm.approvalTimeout = 0
 	}
 }
 
@@ -764,7 +767,10 @@ func runApprovalHook(
 	stage string,
 	fn func(ctx context.Context) (ApprovalDecision, error),
 ) (ApprovalDecision, bool) {
-	ctx, cancel := context.WithTimeout(parent, timeout)
+	ctx, cancel := context.WithCancel(parent)
+	if timeout > 0 {
+		ctx, cancel = context.WithTimeout(parent, timeout)
+	}
 	defer cancel()
 
 	type result struct {

@@ -28,6 +28,11 @@ type ContextBuilder struct {
 	splitOnMarker  bool
 	agentDiscovery func(agentID string) []AgentDescriptor
 	promptRegistry *PromptRegistry
+	// systemPromptOverride replaces the assembled default system prompt.
+	// It is an operator control for embedders that manage the system prompt
+	// themselves. Empty (default) keeps the assembled prompt.
+	overrideMu           sync.RWMutex
+	systemPromptOverride string
 
 	// Cache for system prompt to avoid rebuilding on every call.
 	// This fixes issue #607: repeated reprocessing of the entire context.
@@ -384,11 +389,32 @@ func (cb *ContextBuilder) BuildSystemPromptWithCache() string {
 	return prompt
 }
 
+// SetSystemPromptOverride replaces the assembled default system prompt with s
+// for every subsequent request built by this ContextBuilder. An empty string
+// restores the default assembled prompt.
+func (cb *ContextBuilder) SetSystemPromptOverride(s string) {
+	if cb == nil {
+		return
+	}
+	cb.overrideMu.Lock()
+	defer cb.overrideMu.Unlock()
+	cb.systemPromptOverride = s
+}
+
 func (cb *ContextBuilder) buildSystemPromptForRequest(
 	req PromptBuildRequest,
 ) (string, []providers.ContentBlock) {
 	if req.SuppressDefaultSystemPrompt {
 		return "", nil
+	}
+
+	if cb != nil {
+		cb.overrideMu.RLock()
+		override := cb.systemPromptOverride
+		cb.overrideMu.RUnlock()
+		if override != "" {
+			return override, nil
+		}
 	}
 
 	useDefaultCache := !req.SuppressSkillContext &&

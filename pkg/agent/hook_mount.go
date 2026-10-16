@@ -105,8 +105,8 @@ func configureHookManagerFromConfig(hm *HookManager, cfg *config.Config) {
 }
 
 func hookTimeoutFromMS(ms int) time.Duration {
-	if ms <= 0 {
-		return 0
+	if ms < 0 {
+		return -1 // no deadline (only honored for approval hooks)
 	}
 	return time.Duration(ms) * time.Millisecond
 }
