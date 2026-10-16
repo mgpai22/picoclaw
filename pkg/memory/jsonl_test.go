@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1246,4 +1247,80 @@ func BenchmarkGetHistory_1000(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		_, _ = store.GetHistory(ctx, "bench")
 	}
+}
+
+// TestLockSessionPair_ConcurrentInvertedPairs guards the shard-ordering
+// invariant in lockSessionPair: pair locks must be taken in global shard
+// order. Key order and shard order can disagree (keys hash to shards), so
+// ordering by key lets two concurrent pairs sharing the same two shards in
+// opposite key order deadlock (ABBA). Seen as 10 wedged turn goroutines in
+// lockSessionPair via EnsureSessionMetadata under 10 concurrent sessions.
+func TestLockSessionPair_ConcurrentInvertedPairs(t *testing.T) {
+	// Pair1 (k1<k2) on shards (sA,sB), pair2 (k3<k4) on shards (sB,sA).
+	byShard := map[uint32][]string{}
+	for i := 0; i < 20000; i++ {
+		k := "pairkey-" + strconv.Itoa(i)
+		byShard[sessionShard(k)] = append(byShard[sessionShard(k)], k)
+	}
+	var k1, k2, k3, k4 string
+outer:
+	for sA, as := range byShard {
+		if len(as) == 0 {
+			continue
+		}
+		for sB, bs := range byShard {
+			if sB == sA || len(bs) == 0 {
+				continue
+			}
+			for _, a := range as {
+				for _, b := range bs {
+					if a >= b {
+						continue
+					}
+					for _, c := range bs {
+						for _, d := range as {
+							if c >= d {
+								continue
+							}
+							k1, k2, k3, k4 = a, b, c, d
+							break outer
+						}
+					}
+				}
+			}
+		}
+	}
+	if k1 == "" {
+		t.Fatal("could not find shard-inverting key pairs")
+	}
+	store := newTestStore(t)
+	defer store.Close()
+	finished := make(chan struct{})
+	go func() {
+		select {
+		case <-finished:
+		case <-time.After(30 * time.Second):
+			t.Error("deadlock: concurrent lockSessionPair did not finish in 30s")
+		}
+	}()
+	var wg sync.WaitGroup
+	for g := 0; g < 16; g++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 500; i++ {
+				unlock := store.lockSessionPair(k1, k2)
+				unlock()
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 500; i++ {
+				unlock := store.lockSessionPair(k3, k4)
+				unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	close(finished)
 }

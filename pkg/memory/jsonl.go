@@ -76,13 +76,16 @@ func NewJSONLStore(dir string) (*JSONLStore, error) {
 	return &JSONLStore{dir: dir}, nil
 }
 
-// sessionLock returns a mutex for the given session key.
-// Keys are mapped to a fixed pool of shards via FNV hash, so
-// memory usage is O(1) regardless of total session count.
-func (s *JSONLStore) sessionLock(key string) *sync.Mutex {
+// sessionShard maps a session key to its lock shard index (FNV hash over a
+// fixed pool, so memory usage is O(1) regardless of total session count).
+func sessionShard(key string) uint32 {
 	h := fnv.New32a()
 	h.Write([]byte(key))
-	return &s.locks[h.Sum32()%numLockShards]
+	return h.Sum32() % numLockShards
+}
+
+func (s *JSONLStore) sessionLock(key string) *sync.Mutex {
+	return &s.locks[sessionShard(key)]
 }
 
 func (s *JSONLStore) jsonlPath(key string) string {
@@ -360,26 +363,29 @@ func shouldShortCircuitSessionResolve(sessionKey string) bool {
 	return !strings.ContainsAny(sessionKey, ":/\\")
 }
 
+// lockSessionPair locks the shards for two session keys in a global order.
+// The order MUST be by shard index, not by key: keys map to shards via hash,
+// so key order and shard order can disagree, and two concurrent pairs sharing
+// the same two shards in opposite key order deadlock (ABBA).
 func (s *JSONLStore) lockSessionPair(keyA, keyB string) func() {
-	lockA := s.sessionLock(keyA)
-	lockB := s.sessionLock(keyB)
-	if lockA == lockB {
-		lockA.Lock()
-		return func() { lockA.Unlock() }
+	iA, iB := sessionShard(keyA), sessionShard(keyB)
+	if iA == iB {
+		s.locks[iA].Lock()
+		return func() { s.locks[iA].Unlock() }
 	}
-	if keyA <= keyB {
-		lockA.Lock()
-		lockB.Lock()
+	if iA < iB {
+		s.locks[iA].Lock()
+		s.locks[iB].Lock()
 		return func() {
-			lockB.Unlock()
-			lockA.Unlock()
+			s.locks[iB].Unlock()
+			s.locks[iA].Unlock()
 		}
 	}
-	lockB.Lock()
-	lockA.Lock()
+	s.locks[iB].Lock()
+	s.locks[iA].Lock()
 	return func() {
-		lockA.Unlock()
-		lockB.Unlock()
+		s.locks[iA].Unlock()
+		s.locks[iB].Unlock()
 	}
 }
 
