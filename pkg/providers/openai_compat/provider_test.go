@@ -2196,3 +2196,40 @@ func TestSerializeMessages_StripsSystemParts(t *testing.T) {
 		t.Fatal("system_parts should not appear in serialized output")
 	}
 }
+
+func TestProviderChatStream_RequestsAndParsesUsage(t *testing.T) {
+	var gotStream, gotStreamOptions map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		gotStream = map[string]any{"stream": body["stream"]}
+		if so, ok := body["stream_options"].(map[string]any); ok {
+			gotStreamOptions = so
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":3,\"total_tokens\":14}}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	p := NewProvider("key", server.URL, "")
+	out, err := p.ChatStream(t.Context(), []Message{{Role: "user", Content: "hi"}}, nil, "m", nil, nil)
+	if err != nil {
+		t.Fatalf("ChatStream() error = %v", err)
+	}
+	if out.Content != "hi" {
+		t.Fatalf("Content = %q, want %q", out.Content, "hi")
+	}
+	if gotStream["stream"] != true {
+		t.Fatalf("stream = %v, want true", gotStream["stream"])
+	}
+	if gotStreamOptions["include_usage"] != true {
+		t.Fatalf("stream_options = %v, want include_usage", gotStreamOptions)
+	}
+	if out.Usage == nil || out.Usage.PromptTokens != 11 || out.Usage.CompletionTokens != 3 {
+		t.Fatalf("Usage = %+v, want 11/3", out.Usage)
+	}
+}

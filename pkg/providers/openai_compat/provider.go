@@ -540,6 +540,9 @@ func (p *Provider) ChatStreamEvents(
 
 	requestBody := p.buildRequestBody(messages, tools, model, options)
 	requestBody["stream"] = true
+	// Without this, OpenAI-compatible servers omit the trailing usage chunk
+	// and the streamed response carries no token accounting.
+	requestBody["stream_options"] = map[string]any{"include_usage": true}
 
 	jsonData, err := json.Marshal(requestBody)
 	if err != nil {
